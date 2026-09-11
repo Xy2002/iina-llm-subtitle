@@ -67,11 +67,10 @@ case "${1:-}" in
   universal)
     build_for_arch arm64
     build_for_arch x86_64
+    mkdir -p "$OUT_BASE/universal"
     lipo -create -output "$OUT_BASE/universal/ffmpeg" \
       "$OUT_BASE/arm64/ffmpeg" "$OUT_BASE/x86_64/ffmpeg"
-    lipo -create -output "$OUT_BASE/universal/ffprobe" \
-      "$OUT_BASE/arm64/ffprobe" "$OUT_BASE/x86_64/ffprobe"
-    mkdir -p "$OUT_BASE/universal"
+    lipo -create -output "$OUT_BASE/universal/ffprobe"       "$OUT_BASE/arm64/ffprobe" "$OUT_BASE/x86_64/ffprobe"
     echo "universal binaries in $OUT_BASE/universal/"
     ;;
   *) echo "usage: $0 arm64|x86_64|universal" >&2; exit 1 ;;
