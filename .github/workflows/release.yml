@@ -60,6 +60,7 @@ jobs:
     needs: [plugin, ffmpeg]
     runs-on: macos-14
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -67,8 +68,8 @@ jobs:
         run: |
           mkdir -p release
           cp artifacts/iinaplgz/*.iinaplgz release/
-          cp artifacts/ffmpeg-tools/ffmpeg release/ffmpeg
-          cp artifacts/ffmpeg-tools/ffprobe release/ffprobe
+          cp artifacts/ffmpeg-tools/universal/ffmpeg release/ffmpeg
+          cp artifacts/ffmpeg-tools/universal/ffprobe release/ffprobe
           cp artifacts/ffmpeg-tools/SHA256SUMS release/SHA256SUMS
           cp THIRD_PARTY_NOTICES.md release/
       - name: Create GitHub Release
