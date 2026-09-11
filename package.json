@@ -1,0 +1,24 @@
+{
+  "name": "iina-llm-subtitle",
+  "version": "0.1.0-prototype.1",
+  "private": true,
+  "description": "MAR-91 native subtitle track prototype for IINA",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.js",
+    "build": "node scripts/build.js",
+    "build:helper": "mkdir -p helper/bin && swiftc -O -swift-version 5 helper/main.swift -o helper/bin/iina-llm-subtitle-helper",
+    "dev:link": "npm run build && node scripts/link.js",
+    "qa:fixture": "node scripts/qa-fixture.js",
+    "pack:plugin": "npm run build && node scripts/pack.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "iina-plugin-definition": "0.99.4",
+    "typescript": "6.0.2"
+  }
+}

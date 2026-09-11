@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: -apple-system, sans-serif; font-size: 12px; margin: 10px; color: var(--text, #1d1d1f); }
+    .phase { font-weight: 600; margin-bottom: 6px; }
+    .bar { width: 100%; height: 6px; background: rgba(127,127,127,0.25); border-radius: 3px; overflow: hidden; margin-bottom: 6px; }
+    .bar > div { height: 100%; background: #0a84ff; width: 0%; transition: width 0.2s; }
+    .count { color: rgba(127,127,127,0.9); margin-bottom: 10px; }
+    button { display: inline-block; margin: 2px 4px 2px 0; padding: 2px 10px; font-size: 12px; }
+    .error { color: #c41e3a; margin: 8px 0; white-space: pre-wrap; }
+    .hidden { display: none; }
+    .status { margin: 8px 0; line-height: 1.5; }
+    @media (prefers-color-scheme: dark) { body { color: #f2f2f2; } }
+  </style>
+</head>
+<body>
+  <div id="idleView" class="status" data-i18n="idle">尚未翻译任何字幕。通过插件菜单触发「翻译字幕」。</div>
+
+  <div id="progressView" class="hidden">
+    <div class="phase" id="phase"></div>
+    <div class="bar"><div id="fill"></div></div>
+    <div class="count" id="count"></div>
+    <button id="cancelBtn" data-i18n="cancel">取消</button>
+  </div>
+
+  <div id="errorView" class="hidden">
+    <div class="error" id="errorText"></div>
+    <button id="resumeBtn" data-i18n="resume">继续翻译</button>
+    <button id="giveupBtn" data-i18n="giveup">放弃</button>
+  </div>
+
+  <div id="doneView" class="status hidden" data-i18n="doneIdle">双语字幕已就绪。</div>
+
+  <script>
+    (function () {
+      var messages = {
+        zh: {
+          idle: "尚未翻译任何字幕。通过插件菜单触发「翻译字幕」。",
+          cancel: "取消", resume: "继续翻译", giveup: "放弃",
+          doneIdle: "双语字幕已就绪。",
+          phases: { extract: "提取字幕", glossary: "术语表预检", translate: "翻译中", assembly: "装配字幕" },
+          cancelled: "已取消（已翻译部分已保留，可继续）。", failed: "翻译失败：", givenUp: "已放弃（中间态已保留，可继续）。"
+        },
+        en: {
+          idle: "Nothing translated yet. Use the plugin menu: Translate subtitles.",
+          cancel: "Cancel", resume: "Resume", giveup: "Give up",
+          doneIdle: "Bilingual subtitles ready.",
+          phases: { extract: "Extracting subtitles", glossary: "Glossary pre-check", translate: "Translating", assembly: "Assembling subtitles" },
+          cancelled: "Cancelled (completed batches kept; you can resume).", failed: "Translation failed: ", givenUp: "Given up (progress kept; you can resume)."
+        }
+      };
+      var lang = (navigator.language || "en").toLowerCase().indexOf("zh") === 0 ? "zh" : "en";
+      var t = messages[lang];
+
+      var state = { view: "idle", phase: "", done: 0, total: 0, failed: false, errorMessage: "", cancelled: false };
+
+      function render() {
+        document.getElementById("idleView").classList.toggle("hidden", state.view !== "idle");
+        document.getElementById("doneView").classList.toggle("hidden", !(state.view === "completed" || state.view === "loading"));
+        document.getElementById("progressView").classList.toggle("hidden", state.view !== "running");
+        var hasError = state.view === "error";
+        document.getElementById("errorView").classList.toggle("hidden", !hasError);
+        if (state.view === "running") {
+          var phaseText = t.phases[state.phase] || state.phase || "";
+          document.getElementById("phase").textContent = phaseText;
+          var percent = state.total > 0 ? Math.round((state.done / state.total) * 100) : 0;
+          document.getElementById("fill").style.width = percent + "%";
+          document.getElementById("count").textContent = percent + "% (" + state.done + "/" + state.total + ")";
+        }
+        if (hasError) {
+          document.getElementById("errorText").textContent =
+            (state.cancelled ? t.cancelled : t.failed + state.errorMessage) + "\n" + t.giveup;
+        }
+      }
+
+      window.iina.onMessage("progress", function (data) {
+        state.view = "running";
+        state.phase = data.phase;
+        state.done = data.done;
+        state.total = data.total;
+        state.failed = false;
+        render();
+      });
+      window.iina.onMessage("state", function (data) {
+        state.view = data.view;
+        state.errorMessage = data.errorMessage || "";
+        state.cancelled = data.cancelled || false;
+        render();
+      });
+      document.getElementById("cancelBtn").addEventListener("click", function () {
+        window.iina.postMessage("cancel", null);
+      });
+      document.getElementById("resumeBtn").addEventListener("click", function () {
+        window.iina.postMessage("resume", null);
+      });
+      document.getElementById("giveupBtn").addEventListener("click", function () {
+        window.iina.postMessage("giveup", null);
+      });
+      render();
+    })();
+  </script>
+</body>
+</html>

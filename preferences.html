@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>LLM Subtitle Translator</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; margin: 12px; }
+    .pref-section { margin-bottom: 14px; }
+    .pref-help { margin-top: 2px; }
+    .small { font-size: 11px; }
+    .secondary { color: rgba(127,127,127,0.9); }
+    input[type="text"], input[type="number"], select { width: 320px; }
+    input[type="color"] { width: 44px; height: 22px; padding: 0; }
+    h2 { font-size: 13px; margin: 18px 0 6px; }
+  </style>
+</head>
+<body>
+  <h2 data-i18n="providerTitle">LLM 服务 / LLM Service</h2>
+  <div class="pref-section">
+    <div class="pref-section">
+      <label><span data-i18n="baseUrl">API 地址 (Base URL)</span>:<br>
+        <input type="text" data-pref-key="baseUrl" placeholder="https://api.deepseek.com" style="margin-top: 2px" />
+      </label>
+    </div>
+    <div class="pref-section">
+      <label><span data-i18n="model">模型 (Model)</span>:<br>
+        <input type="text" data-pref-key="model" placeholder="deepseek-chat" style="margin-top: 2px" />
+      </label>
+    </div>
+    <div class="pref-section">
+      <label><span data-i18n="apiKey">API Key</span>:<br>
+        <input type="text" data-pref-key="apiKey" style="margin-top: 2px" />
+      </label>
+      <p class="small secondary pref-help" data-i18n="apiKeyHelp">保存后写入插件数据目录的 config.json（0600 权限），仅由本地翻译助手读取。</p>
+    </div>
+  </div>
+
+  <h2 data-i18n="translationTitle">翻译 / Translation</h2>
+  <div class="pref-section">
+    <label><span data-i18n="targetLanguage">译入语言 (Target language)</span>:
+      <select data-pref-key="targetLanguage">
+        <option value="zh-Hans">简体中文</option>
+        <option value="zh-Hant">繁體中文</option>
+        <option value="en">English</option>
+        <option value="ja">日本語</option>
+        <option value="ko">한국어</option>
+        <option value="fr">Français</option>
+        <option value="de">Deutsch</option>
+        <option value="es">Español</option>
+        <option value="ru">Русский</option>
+      </select>
+    </label>
+  </div>
+  <div class="pref-section">
+    <label><span data-i18n="defaultMode">默认显示模式 (Default display mode)</span>:
+      <select data-pref-key="defaultMode">
+        <option value="bilingual" data-i18n="bilingual">双语 (Bilingual)</option>
+        <option value="translationOnly" data-i18n="translationOnly">仅译文 (Translation only)</option>
+      </select>
+    </label>
+  </div>
+  <div class="pref-section">
+    <label><input type="checkbox" data-type="bool" data-pref-key="autoTranslate" />
+      <span data-i18n="autoTranslate">打开视频时自动翻译未缓存的字幕轨（默认关闭）</span>
+    </label>
+  </div>
+  <div class="pref-section">
+    <label><span data-i18n="maxRetries">自动重试次数 (Auto retries)</span>:
+      <input type="number" data-pref-key="maxRetries" min="0" max="10" style="width: 60px" />
+    </label>
+  </div>
+
+  <h2 data-i18n="styleTitle">字幕样式 / Subtitle Style</h2>
+  <div class="pref-section">
+    <label><span data-i18n="translationColor">译文颜色 (Translation color)</span>:
+      <input type="color" data-pref-key="translationColor" />
+    </label>
+  </div>
+  <div class="pref-section">
+    <label><span data-i18n="fontSizeRatio">译文字号比例 (Translation font ratio)</span>:
+      <input type="number" data-pref-key="fontSizeRatio" min="0.4" max="2" step="0.01" style="width: 60px" />
+    </label>
+  </div>
+  <div class="pref-section">
+    <label><span data-i18n="lineOrder">行序 (Line order)</span>:
+      <select data-pref-key="lineOrder">
+        <option value="originalFirst" data-i18n="originalFirst">原文在上，译文在下 (Original above)</option>
+        <option value="translationFirst" data-i18n="translationFirst">译文在上，原文在下 (Translation above)</option>
+      </select>
+    </label>
+    <p class="small secondary pref-help" data-i18n="styleHelp">样式改动会在下次加载缓存字幕时生效，无需重新翻译。</p>
+  </div>
+
+  <h2 data-i18n="cacheTitle">缓存 / Cache</h2>
+  <div class="pref-section">
+    <label><span data-i18n="cacheLimitMB">缓存上限 (MB) (Cache size limit)</span>:
+      <input type="number" data-pref-key="cacheLimitMB" min="10" style="width: 80px" />
+    </label>
+  </div>
+  <div class="pref-section">
+    <button type="button" id="clearCacheButton" data-i18n="clearCache">清除全部缓存 (Clear all cache)</button>
+    <span id="clearStatus" class="small secondary"></span>
+  </div>
+
+  <h2 data-i18n="shortcutsTitle">快捷键 / Shortcuts</h2>
+  <div class="pref-section">
+    <label><span data-i18n="translateHotkey">翻译字幕快捷键 (Translate hotkey)</span>:<br>
+      <input type="text" data-pref-key="translateHotkey" placeholder="ctrl+t" style="margin-top: 2px" />
+    </label>
+    <p class="small secondary pref-help" data-i18n="hotkeyHelp">mpv 按键格式（如 ctrl+t），重启 IINA 后生效。</p>
+  </div>
+
+  <h2 data-i18n="advancedTitle">高级 / Advanced</h2>
+  <div class="pref-section">
+    <label><span data-i18n="ffmpegPath">ffmpeg 路径 (ffmpeg path)</span>:<br>
+      <input type="text" data-pref-key="ffmpegPath" style="margin-top: 2px" />
+    </label>
+    <p class="small secondary pref-help" data-i18n="ffmpegHelp">留空则自动探测 Homebrew 位置；用于提取内嵌字幕。</p>
+  </div>
+  <div class="pref-section">
+    <label><span data-i18n="ffprobePath">ffprobe 路径 (ffprobe path)</span>:<br>
+      <input type="text" data-pref-key="ffprobePath" style="margin-top: 2px" />
+    </label>
+  </div>
+  <div class="pref-section">
+    <label><span data-i18n="helperPath">翻译助手路径 (Helper binary path)</span>:<br>
+      <input type="text" data-pref-key="helperPath" style="margin-top: 2px" />
+    </label>
+    <p class="small secondary pref-help" data-i18n="helperHelp">指向 helper/bin/iina-llm-subtitle-helper；打包版会自动内置。</p>
+  </div>
+
+  <script>
+    (function () {
+      var messages = {
+        zh: {
+          providerTitle: "LLM 服务", baseUrl: "API 地址 (Base URL)", model: "模型 (Model)", apiKey: "API Key",
+          apiKeyHelp: "保存后写入插件数据目录的 config.json（0600 权限），仅由本地翻译助手读取。",
+          translationTitle: "翻译", targetLanguage: "译入语言 (Target language)",
+          defaultMode: "默认显示模式 (Default display mode)", bilingual: "双语 (Bilingual)",
+          translationOnly: "仅译文 (Translation only)",
+          autoTranslate: "打开视频时自动翻译未缓存的字幕轨（默认关闭）",
+          maxRetries: "自动重试次数 (Auto retries)", styleTitle: "字幕样式",
+          translationColor: "译文颜色 (Translation color)", fontSizeRatio: "译文字号比例 (Translation font ratio)",
+          lineOrder: "行序 (Line order)", originalFirst: "原文在上，译文在下 (Original above)",
+          translationFirst: "译文在上，原文在下 (Translation above)",
+          styleHelp: "样式改动会在下次加载缓存字幕时生效，无需重新翻译。",
+          cacheTitle: "缓存", cacheLimitMB: "缓存上限 (MB) (Cache size limit)",
+          clearCache: "清除全部缓存 (Clear all cache)", clearDone: "已清除。",
+          shortcutsTitle: "快捷键", translateHotkey: "翻译字幕快捷键 (Translate hotkey)",
+          hotkeyHelp: "mpv 按键格式（如 ctrl+t），重启 IINA 后生效。",
+          advancedTitle: "高级", ffmpegPath: "ffmpeg 路径 (ffmpeg path)",
+          ffmpegHelp: "留空则自动探测 Homebrew 位置；用于提取内嵌字幕。",
+          ffprobePath: "ffprobe 路径 (ffprobe path)",
+          helperPath: "翻译助手路径 (Helper binary path)",
+          helperHelp: "指向 helper/bin/iina-llm-subtitle-helper；打包版会自动内置。"
+        },
+        en: {}
+      };
+      var lang = (navigator.language || "en").toLowerCase().indexOf("zh") === 0 ? "zh" : "en";
+      var hidden = document.createElement("input");
+      hidden.type = "hidden";
+      hidden.setAttribute("data-pref-key", "clearCacheRequested");
+      document.body.appendChild(hidden);
+      document.getElementById("clearCacheButton").addEventListener("click", function () {
+        hidden.value = String(Date.now());
+        hidden.dispatchEvent(new Event("change"));
+        var status = document.getElementById("clearStatus");
+        status.textContent = lang === "zh" ? "已请求清除，将于下次打开视频时生效。" : "Clear requested; applies on next video.";
+      });
+      if (lang === "en") return; // English is the default text
+      var table = messages.zh;
+      document.querySelectorAll("[data-i18n]").forEach(function (el) {
+        var key = el.getAttribute("data-i18n");
+        if (table[key]) el.textContent = table[key];
+      });
+    })();
+  </script>
+</body>
+</html>

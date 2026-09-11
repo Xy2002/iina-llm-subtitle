@@ -1,0 +1,50 @@
+{
+  "name": "LLM Subtitle Prototype",
+  "identifier": "com.weixiangyu.iina.llm-subtitle.prototype",
+  "version": "0.1.0-prototype.1",
+  "description": "LLM 字幕翻译：将内嵌/外挂字幕整轨翻译为双语字幕（支持 OpenAI 兼容接口）。Translate subtitle tracks with an LLM.",
+  "author": {
+    "name": "weixiangyu"
+  },
+  "entry": "main.js",
+  "minIINAVersion": "1.4.0",
+  "permissions": [
+    "file-system",
+    "show-osd",
+    "network-request"
+  ],
+  "permissionDescriptions": {
+    "file-system": "读取用户选择的外挂 SRT，将双语 ASS 写入插件自己的数据目录。",
+    "show-osd": "显示字幕加载结果与可处理的错误。",
+    "network-request": "仅通过本机回环地址（127.0.0.1）与翻译助手通信；所有外网请求由助手发出。"
+  },
+  "allowedDomains": [
+    "127.0.0.1"
+  ],
+  "preferencesPage": "preferences.html",
+  "preferenceDefaults": {
+    "baseUrl": "",
+    "model": "",
+    "apiKey": "",
+    "targetLanguage": "zh-Hans",
+    "defaultMode": "bilingual",
+    "translationColor": "#FFE580",
+    "fontSizeRatio": 0.89,
+    "lineOrder": "originalFirst",
+    "autoTranslate": false,
+    "maxRetries": 3,
+    "translateHotkey": "",
+    "cacheLimitMB": 200,
+    "clearCacheRequested": 0,
+    "ffmpegPath": "",
+    "ffprobePath": "",
+    "helperPath": "",
+    "ffmpegForceBundled": false,
+    "ffmpegDownloadBaseUrl": ""
+  },
+  "sidebarTab": {
+    "name": "翻译 / Translate"
+  },
+  "ghRepo": "Xy2002/iina-llm-subtitle",
+  "ghVersion": 1
+}
