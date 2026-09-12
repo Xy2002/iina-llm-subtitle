@@ -62,6 +62,7 @@ function buildBilingualAss(cues, translations, style) {
     // ASS-native cues keep their inline override tags on the original line so
     // libass still applies the source styling; SRT text gets escaped.
     const original = cue.isAssNative ? cue.rawText : escapeAssText(cue.text);
+    if (cue.isDrawingOnly) return dialogueLine(cue, "Original", original || "");
     const translation = escapeAssText(translations[index]);
     const text = translationFirst
       ? `${translation}\\N{\\rOriginal}${original}`
@@ -79,7 +80,7 @@ function buildBilingualAss(cues, translations, style) {
 /** @param {import('./index.js').Cue[]} cues @param {string[]} translations @param {AssemblyStyle} [style] @returns {string} */
 function buildTranslationOnlyAss(cues, translations, style) {
   assertSameLength(cues, translations);
-  const events = cues.map((cue, index) => dialogueLine(cue, "Translation", escapeAssText(translations[index])));
+  const events = cues.flatMap((cue, index) => cue.isDrawingOnly ? [] : [dialogueLine(cue, "Translation", escapeAssText(translations[index]))]);
   return assHeader(style) + events.join("\n") + "\n";
 }
 

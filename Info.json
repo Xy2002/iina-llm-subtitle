@@ -7,6 +7,7 @@
     "name": "weixiangyu"
   },
   "entry": "main.js",
+  "globalEntry": "global.js",
   "minIINAVersion": "1.4.0",
   "permissions": [
     "file-system",
@@ -26,6 +27,7 @@
     "baseUrl": "",
     "model": "",
     "apiKey": "",
+    "credentialsEditRequested": 0,
     "targetLanguage": "zh-Hans",
     "defaultMode": "bilingual",
     "translationColor": "#FFE580",

@@ -8,9 +8,10 @@ const { createEngine } = require("../src/engine/index.js");
 const SRT = "1\n00:00:01,000 --> 00:00:03,500\nHello world.\n\n2\n00:00:04,000 --> 00:00:06,000\nSecond cue.";
 
 /** In-memory storage port + counting fake transport, shared fixture. */
-function makeRig() {
+function makeRig(controls = {}) {
   /** @type {Map<string, any>} */
   const records = new Map();
+  const requests = [];
   let transportCalls = 0;
   const storage = {
     /** @param {string} key @returns {Promise<any | null>} */
@@ -35,13 +36,17 @@ function makeRig() {
     /** @param {{body: any}} _request @returns {Promise<{status: number, retryAfter: null, json: any}>} */
     postJson: async (_request) => {
       transportCalls += 1;
-      const cues = JSON.parse(_request.body.messages[1].content).cues;
+      const context = JSON.parse(_request.body.messages[1].content);
+      requests.push(context);
+      if (context.purpose === "glossary") return { status: 200, retryAfter: null, json: { glossary: [] } };
+      const cues = context.cues;
       return { status: 200, retryAfter: null, json: { translations: cues.map((cue) => ({ id: cue.id, text: `[译] ${cue.text}` })) } };
     },
   };
   return {
-    engine: createEngine({ storage, transport, glossaryPrecheck: false }),
+    engine: createEngine({ storage, transport, glossaryPrecheck: false, ...controls }),
     records,
+    requests,
     calls: () => transportCalls,
     state: (key) => records.get(`state:${key}`) || null,
   };
@@ -97,6 +102,15 @@ test("bad SRT input fails before any translation cost", async () => {
   assert.equal(rig.calls(), 0);
 });
 
+test("engine cancellation dependency stops requests and preserves resumable state", async () => {
+  const rig = makeRig({ shouldCancel: () => true });
+  const result = await rig.engine.translateTrack(SRT, { model: "m", targetLanguage: "zh-Hans" });
+  assert.equal(result.status, "cancelled");
+  assert.equal(rig.calls(), 0, "cancelled work must not send paid requests");
+  assert.equal(result.bilingual, undefined, "cancelled work must not assemble a track");
+  assert.ok(rig.state(result.cacheKey), "a cancelled run retains resumable state");
+});
+
 test("re-saved BOM/CRLF variants hit the same cache entry", async () => {
   const rig = makeRig();
   const first = await rig.engine.translateTrack(SRT, { model: "glm-4", targetLanguage: "zh-Hans" });
@@ -117,6 +131,28 @@ test("ASS-source cues keep inline tags on the original line, plain text to the t
     /\{\\i1\}Styled\{\\i0\} ASS line\.\\N\{\\rTranslation\}\[译\] Styled ASS line\./,
   );
   assert.equal(result.status, "completed");
+});
+
+test("ASS drawings render only in the bilingual variant and never reach the LLM", async () => {
+  const rig = makeRig({ glossaryPrecheck: true });
+  const drawing = "{\\p1}m 0 0 l 100 0 100 100 0 100";
+  const subtitle = { format: "ass", content: `[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Hello\nDialogue: 0,0:00:04.00,0:00:05.00,Default,,0,0,0,,${drawing}\nDialogue: 0,0:00:06.00,0:00:07.00,Default,,0,0,0,,${drawing}{\\p0}World\n` };
+  const result = await rig.engine.translateTrack(subtitle, { model: "m", targetLanguage: "zh-Hans" });
+  assert.equal(rig.requests.length, 2, "one glossary request and one translation request");
+  for (const request of rig.requests) {
+    assert.deepEqual(request.cues, [{ id: "t0", text: "Hello" }, { id: "t2", text: "World" }]);
+  }
+  const bilingualEvents = result.bilingual.content.split("\n").filter((line) => line.startsWith("Dialogue:"));
+  assert.equal(bilingualEvents.length, 3, "keep the original drawing event");
+  assert.ok(bilingualEvents[1].endsWith(drawing), "drawing-only events have no appended translation or line break");
+  const translatedEvents = result.translationOnly.content.split("\n").filter((line) => line.startsWith("Dialogue:"));
+  assert.equal(translatedEvents.length, 2);
+  assert.ok(translatedEvents.every((line) => !line.includes("m 0 0")));
+  assert.match(translatedEvents[1], /\[译\] World$/);
+  const cached = await rig.engine.translateTrack(subtitle, { model: "m", targetLanguage: "zh-Hans" });
+  assert.equal(cached.cacheHit, true);
+  assert.equal(cached.bilingual.content, result.bilingual.content);
+  assert.equal(rig.requests.length, 2);
 });
 
 test("cache hit re-assembles with the current style without re-translation", async () => {

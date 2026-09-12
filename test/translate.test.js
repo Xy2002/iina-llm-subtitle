@@ -212,6 +212,20 @@ test("repeated timeouts split the batch in half and both halves succeed", async 
   assert.deepEqual(halves, ["t0,t1", "t2,t3"], "the split halves must cover the original batch");
 });
 
+test("helper HTTP 504 timeouts split the batch and retain every cue", async () => {
+  const cues = makeCues(4);
+  const transport = scriptTransport([
+    { status: 504, retryAfter: null, json: { error: { type: "timeout", message: "upstream timeout" } } },
+    { status: 504, retryAfter: null, json: { error: { type: "timeout", message: "upstream timeout" } } },
+    echoOk,
+  ]);
+  const rig = makeRig({ transport });
+  const result = await createBatchTranslator(rig.deps)(cues, { cacheKey: "k", model: "m", targetLanguage: "zh-Hans" });
+  assert.equal(result.status, "completed");
+  assert.deepEqual(transport.calls.map((request) => parseRequestCues(request).length), [4, 4, 2, 2]);
+  assert.deepEqual(Object.keys(result.translationsById), ["t0", "t1", "t2", "t3"]);
+});
+
 test("concurrency never exceeds 2 with many batches", async () => {
   const cues = makeCues(12);
   const transport = scriptTransport([echoOk], { latency: 5 });
@@ -242,6 +256,18 @@ test("cancel mid-run: completed batches persist, nothing assembles, status cance
   assert.ok(Object.keys(saved).length > 0, "completed batches kept in state");
 });
 
+test("cancelling during backoff prevents another paid retry", async () => {
+  let cancel = false;
+  const transport = scriptTransport([() => { throw Object.assign(new Error("offline"), { code: "network" }); }]);
+  const rig = makeRig({ transport, shouldCancel: () => cancel });
+  rig.deps.delay = async () => { cancel = true; };
+  const result = await createBatchTranslator(rig.deps)(makeCues(2), { cacheKey: "k", model: "m", targetLanguage: "zh-Hans" });
+  assert.equal(result.status, "cancelled");
+  assert.equal(result.completed, 0);
+  assert.equal(transport.calls.length, 1);
+  assert.deepEqual(rig.lastState().translations, {});
+});
+
 test("re-entry after cancel translates only the remaining cues", async () => {
   const cues = makeCues(4);
   const state = { version: 1, translations: { t0: "[译] L0", t1: "[译] L1" } };
@@ -270,6 +296,34 @@ test("fatal error after completed batches persists their state", async () => {
   const saved = rig.lastState();
   assert.ok(saved && Object.keys(saved.translations).length > 0, "completed batches survived the fatal error");
   assert.ok(Object.keys(saved.translations).length < 4, "and incomplete batches did not fake completion");
+});
+
+test("failure waits for dispatched batches to persist before allowing a resume", async () => {
+  const cues = makeCues(4);
+  let releaseFirst;
+  const transport = scriptTransport([
+    (request) => new Promise((resolve) => { releaseFirst = () => resolve(echoOk(request)); }),
+    { status: 402, retryAfter: null, json: null },
+  ]);
+  const rig = makeRig({ transport, maxBatchChars: 15 });
+  let settled = false;
+  const run = createBatchTranslator(rig.deps)(cues, { cacheKey: "k", model: "m", targetLanguage: "zh-Hans" });
+  const observed = run.then(
+    () => { settled = true; return null; },
+    (error) => { settled = true; return error; },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  const settledBeforeFirstBatch = settled;
+  releaseFirst();
+  const error = await observed;
+  assert.equal(settledBeforeFirstBatch, false, "returning early allows a new run to request the same pending cues");
+  assert.equal(error.classification, "quota");
+  assert.deepEqual(Object.keys(rig.lastState().translations), ["t0", "t1"]);
+
+  const resumedTransport = scriptTransport([echoOk]);
+  const resumed = makeRig({ transport: resumedTransport, state: JSON.parse(JSON.stringify(rig.lastState())), maxBatchChars: 15 });
+  await createBatchTranslator(resumed.deps)(cues, { cacheKey: "k", model: "m", targetLanguage: "zh-Hans" });
+  assert.deepEqual(resumedTransport.calls.flatMap(parseRequestCues).map((cue) => cue.id), ["t2", "t3"]);
 });
 
 test("OpenAI-shaped responses with fenced JSON content are accepted", async () => {
