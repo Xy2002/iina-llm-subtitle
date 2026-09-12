@@ -173,3 +173,67 @@ test("a temporary HTTP polling failure also keeps the existing job", async () =>
   assert.equal(result.retryAfter, 9);
   assert.equal(submissions, 1);
 });
+
+test("a poll 404 reacquires the connection and resubmits the same job id", async () => {
+  const submitted = [];
+  const helpers = [{ port: 1, token: "old" }, { port: 2, token: "new" }];
+  let launches = 0;
+  let polls = 0;
+  const transport = createJobTransport({
+    getConnection: async () => helpers[launches++ % helpers.length], delay: async () => {}, makeId: () => "restart-job",
+    http: {
+      post: async (_url, options) => {
+        submitted.push({ id: options.data.id, authorization: options.headers.Authorization });
+        return { statusCode: 202, data: { id: options.data.id, state: "pending" } };
+      },
+      get: async () => {
+        polls += 1;
+        if (polls === 1) return { statusCode: 404, data: { error: { message: "request not found" } } };
+        return { statusCode: 200, data: { id: "restart-job", state: "completed", response: { status: 200, json: {}, retryAfter: null } } };
+      },
+      delete: async () => ({ statusCode: 200, data: {} }),
+    },
+  });
+  const result = await transport.postJson({ path: "/chat/completions", body: { model: "m" } });
+  assert.equal(result.status, 200);
+  assert.deepEqual(submitted.map((entry) => entry.id), ["restart-job", "restart-job"], "the same job id must be reused, never a duplicate");
+  assert.deepEqual(submitted.map((entry) => entry.authorization), ["Bearer old", "Bearer new"], "the replacement helper must be used");
+});
+
+test("loopback transport failures reacquire the connection for the next attempt", async () => {
+  const launchedPorts = [];
+  let launches = 0;
+  const transport = createJobTransport({
+    getConnection: async () => {
+      const helper = { port: 9000 + launches, token: "local-session" };
+      launchedPorts.push(helper.port);
+      launches += 1;
+      return helper;
+    },
+    delay: async () => {}, makeId: () => "stale",
+    http: {
+      post: async (_url, options) => ({ statusCode: 202, data: { id: options.data.id, state: "pending" } }),
+      get: async () => { throw new Error("connection refused"); },
+      delete: async () => ({ statusCode: 200, data: {} }),
+    },
+  });
+  await assert.rejects(transport.postJson({ path: "/chat/completions", body: { model: "m" } }), { code: "network" });
+  await assert.rejects(transport.postJson({ path: "/chat/completions", body: { model: "m" } }), { code: "network" });
+  assert.deepEqual(launchedPorts, [9000, 9001], "the second attempt must not reuse the first helper's connection");
+});
+
+test("repeated 404 polls settle the job instead of resubmitting forever", async () => {
+  let submissions = 0;
+  const transport = createJobTransport({
+    getConnection: async () => connection, delay: async () => {}, makeId: () => "gone",
+    http: {
+      post: async (_url, options) => { submissions += 1; return { statusCode: 202, data: { id: options.data.id, state: "pending" } }; },
+      get: async () => ({ statusCode: 404, data: { error: { message: "request not found" } } }),
+      delete: async () => ({ statusCode: 200, data: {} }),
+    },
+  });
+  const request = { path: "/chat/completions", body: { model: "m" } };
+  assert.equal((await transport.postJson(request)).status, 404);
+  assert.equal((await transport.postJson(request)).status, 404);
+  assert.equal(submissions, 6, "resubmission is bounded to two rounds per attempt, and a settled job starts fresh");
+});

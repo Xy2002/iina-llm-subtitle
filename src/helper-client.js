@@ -83,18 +83,41 @@ function createJobTransport(deps) {
 
   /** @param {PendingJob} job @param {any} body @returns {Promise<JobResult>} */
   async function continueJob(job, body) {
-    if (!job.connection) job.connection = await deps.getConnection();
-    const connection = job.connection;
-    if (!job.submitted) {
-      const accepted = await exchange(connection, "post", "/requests", { id: job.id, body });
-      if (accepted.status !== 202 && accepted.status !== 200) {
-        job.settled = true; // An explicit rejection did not accept this job.
-        return { status: accepted.status, json: accepted.json, retryAfter: null };
+    for (let round = 0; ; round += 1) {
+      if (!job.connection) job.connection = await deps.getConnection();
+      const connection = job.connection;
+      if (!job.submitted) {
+        /** @type {{status: number, json: any}} */
+        let accepted;
+        try {
+          accepted = await exchange(connection, "post", "/requests", { id: job.id, body });
+        } catch (error) {
+          job.connection = null; // The helper may have restarted; reacquire before the next attempt.
+          throw error;
+        }
+        if (accepted.status !== 202 && accepted.status !== 200) {
+          job.settled = true; // An explicit rejection did not accept this job.
+          return { status: accepted.status, json: accepted.json, retryAfter: null };
+        }
+        job.submitted = true;
       }
-      job.submitted = true;
-    }
-    while (true) {
-      const polled = await exchange(connection, "get", `/requests/${job.id}`);
+      /** @type {{status: number, json: any}} */
+      let polled;
+      try {
+        polled = await exchange(connection, "get", `/requests/${job.id}`);
+      } catch (error) {
+        job.connection = null; // The helper may have restarted; reacquire before the next attempt.
+        throw error;
+      }
+      if (polled.status === 404 && round < 2) {
+        // Pending jobs are never purged, so a 404 means the upstream work is
+        // definitively lost (helper restart or retention expiry). Resubmit
+        // under the same id: the same id plus the same body is idempotent, so
+        // a surviving duplicate cannot be created.
+        job.connection = null;
+        job.submitted = false;
+        continue;
+      }
       if (polled.status !== 200) {
         // Other polling failures do not tell us whether upstream work ran.
         if (polled.status === 404) job.settled = true;

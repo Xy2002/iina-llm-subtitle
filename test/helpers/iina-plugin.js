@@ -34,6 +34,7 @@ async function loadIinaPlugin(options = {}) {
   const menus = [];
   const jobs = new Map();
   const timers = new Map();
+  let pollFailuresLeft = options.pollFailures || 0;
   let clock = 0;
   let nextTimer = 1;
   let media = MEDIA_PATH;
@@ -102,6 +103,7 @@ async function loadIinaPlugin(options = {}) {
     },
     async get(url) {
       const id = url.split("/").at(-1);
+      if (pollFailuresLeft > 0) { pollFailuresLeft -= 1; throw new Error("loopback exchange lost"); }
       const response = await jobs.get(id);
       return { statusCode: 200, data: { id, state: "completed", response } };
     },

@@ -70,9 +70,13 @@ async function migrateCredentials(server) {
   if (migrated) return;
   if (migrating) return migrating;
   migrating = (async () => {
-    // Import non-secret settings from the old config once. The existing
-    // credential file stays with the helper and is never copied to prefs.
-    if (file.exists(CONFIG_PATH) && !preferences.get("baseUrl")) {
+    // Import non-secret settings from the old config once, each key on its
+    // own: an upgraded install may already carry one setting (e.g. baseUrl)
+    // in preferences while the rest still live only in the legacy file, and
+    // posting credentials below rewrites the file and would erase them. The
+    // existing credential file stays with the helper and is never copied to
+    // prefs.
+    if (file.exists(CONFIG_PATH)) {
       try {
         const legacy = JSON.parse(file.read(CONFIG_PATH, {}) || "{}");
         for (const key of ["baseUrl", "model", "targetLanguage", "ffmpegPath", "ffprobePath"]) {

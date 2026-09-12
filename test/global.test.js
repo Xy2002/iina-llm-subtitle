@@ -91,6 +91,18 @@ test("file-only legacy configuration imports non-secret provider settings withou
   assert.ok(!JSON.stringify(app.savedPreferences).includes("file-only-fake"));
 });
 
+test("a partially migrated install imports each remaining legacy setting independently", async () => {
+  const app = globalEntry(
+    { baseUrl: "https://current.invalid/v1", model: "" },
+    { baseUrl: "https://legacy.invalid/v1", model: "legacy-model", targetLanguage: "zh-Hans", apiKey: "file-only-fake" },
+  );
+  await app.editorEvents.ready({ path: "/renamed bundle/credentials.html" });
+  assert.equal(app.prefs.model, "legacy-model", "a missing setting is imported even though baseUrl already exists");
+  assert.equal(app.prefs.targetLanguage, "zh-Hans");
+  assert.equal(app.prefs.baseUrl, "https://current.invalid/v1", "an existing preference is never overwritten");
+  assert.equal(app.credentials().apiKey, "file-only-fake");
+});
+
 test("helper exit allows a fresh launch and empty key saves remove the credential", async () => {
   const app = globalEntry();
   await app.editorEvents.ready({ path: "/renamed bundle/credentials.html" });

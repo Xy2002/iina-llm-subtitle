@@ -140,10 +140,15 @@ async function ensureHelper(config) {
   return result.connection;
 }
 
-/** @param {PluginConfig} config */
-function makeTransport(config) {
-  return createJobTransport({ http, getConnection: () => ensureHelper(config) });
-}
+// One transport per entry load: the pending-job registry must outlive a run,
+// so a resumed run waits on the same uncertain job instead of submitting the
+// same paid request under a new id after the previous run gave up on it.
+// The clock port is threaded from this entry so tests can simulate backoff.
+const jobTransport = createJobTransport({
+  http,
+  getConnection: () => ensureHelper(readPrefs()),
+  delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+});
 
 // MARK: process port for extraction
 
@@ -239,7 +244,8 @@ function isCurrentRun(run) {
 function getEngine(config, run) {
   return createEngine({
     storage: { ...storage, ...sizeTrackingStorage },
-    transport: makeTransport(config),
+    transport: jobTransport,
+    delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     maxBatchChars: config.maxBatchChars,
     maxRetries: config.maxRetries,
     glossaryPrecheck: true,

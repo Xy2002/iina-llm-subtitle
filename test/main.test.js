@@ -60,6 +60,21 @@ test("cancellation keeps completed work without assembling or loading, then resu
   assert.equal(rig.loads.length, 1);
 });
 
+test("a resumed run waits on the uncertain job of the failed run instead of re-paying it", async () => {
+  // 9 lost loopback polls exhaust the glossary pre-check and both batch
+  // attempts (3 exchanges each) while the helper still owns both jobs.
+  const rig = await loadIinaPlugin({ preferences: { maxRetries: 1 }, pollFailures: 9 });
+  await rig.click(TRANSLATE);
+  await rig.advance(10000);
+  assert.equal(rig.sidebarMessages.at(-1).data.view, "error");
+  assert.equal(translationRequests(rig).length, 1);
+  assert.equal(rig.loads.length, 0);
+  await rig.sidebar("resume");
+  assert.equal(translationRequests(rig).length, 1, "the resumed run must wait on the same job, not submit a duplicate");
+  assert.equal(rig.loads.length, 1);
+  assert.match(rig.loads[0].path, /\.bilingual\.ass$/);
+});
+
 test("a completed result from an old video never loads into the next video", async () => {
   const pending = deferred();
   let invoked = 0;
