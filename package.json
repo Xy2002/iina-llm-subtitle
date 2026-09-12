@@ -11,10 +11,10 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.js",
     "build": "node scripts/build.js",
-    "build:helper": "mkdir -p helper/bin && swiftc -O -swift-version 5 helper/main.swift -o helper/bin/iina-llm-subtitle-helper",
+    "build:helper": "node scripts/build-helper.js",
     "dev:link": "npm run build && node scripts/link.js",
     "qa:fixture": "node scripts/qa-fixture.js",
-    "pack:plugin": "npm run build && node scripts/pack.js"
+    "pack:plugin": "npm run build:helper && npm run build && node scripts/pack.js"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",

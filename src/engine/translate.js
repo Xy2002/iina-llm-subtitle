@@ -57,7 +57,7 @@ function planBatches(cues, options) {
 
 /** @param {number} status @returns {string} */
 function classifyStatus(status) {
-  if (status === 408) return "timeout";
+  if (status === 408 || status === 504) return "timeout";
   if (status === 429) return "rate";
   if (status === 401 || status === 402 || status === 403) return "quota";
   if (status >= 500) return "server";
@@ -246,7 +246,7 @@ function createBatchTranslator(deps) {
       return merged;
     }
 
-    /** @param {Array<{ordinal: number, text: string}>} batch */
+    /** @param {Array<{ordinal: number, text: string}>} batch @returns {Promise<boolean>} */
     async function runBatch(batch) {
       const requestCues = batch.map((cue) => ({ id: wireId(cue.ordinal), text: cue.text }));
       const body = {
@@ -268,6 +268,10 @@ function createBatchTranslator(deps) {
       let attempt = 0;
       let timeouts = 0;
       for (;;) {
+        if (cancelled || shouldCancel()) {
+          cancelled = true;
+          return false;
+        }
         attempt += 1;
         /** @type {{status: number, retryAfter?: number | null, json: any, transportError?: TransportError}} */
         let response;
@@ -288,7 +292,7 @@ function createBatchTranslator(deps) {
             continue;
           }
           for (const cue of batch) state.translations[wireId(cue.ordinal)] = byId.get(wireId(cue.ordinal));
-          return;
+          return true;
         }
 
         const code = response.transportError ? (response.transportError.code || "network") : classifyStatus(response.status);
@@ -324,7 +328,7 @@ function createBatchTranslator(deps) {
         const item = queue[cursor];
         cursor += 1;
         try {
-          await runBatch(item.batch);
+          if (!await runBatch(item.batch)) return;
         } catch (error) {
           const splitSignal = /** @type {TransportError} */ (error);
           if (splitSignal && splitSignal.split) {
@@ -342,7 +346,19 @@ function createBatchTranslator(deps) {
         if (onProgress) onProgress({ phase: "translation", done, total, linesDone: countTranslated(), linesTotal: cues.length });
       }
     }
-    await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+    // A failed request must not return control while another worker can
+    // still persist state. Otherwise a resumed run races that old writer.
+    const outcomes = await Promise.allSettled(Array.from({ length: CONCURRENCY }, async () => {
+      try {
+        await worker();
+      } catch (error) {
+        cancelled = true;
+        throw error;
+      }
+    }));
+    for (const outcome of outcomes) {
+      if (outcome.status === "rejected") throw outcome.reason;
+    }
 
     if (cancelled) {
       await deps.storage.putState(cacheKey, state);

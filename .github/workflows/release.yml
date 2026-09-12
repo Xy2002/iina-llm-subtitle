@@ -25,7 +25,6 @@ jobs:
       - run: npm run build
       - name: Pack .iinaplgz
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
           node scripts/pack.js --out "dist/iina-llm-subtitle-${GITHUB_REF_NAME}.iinaplgz"
       - uses: actions/upload-artifact@v4
         with:
@@ -34,27 +33,26 @@ jobs:
 
   ffmpeg:
     runs-on: macos-14
+    env:
+      FFMPEG_VERSION: "8.1.2"
     steps:
       - uses: actions/checkout@v4
       - name: Build minimal LGPL FFmpeg (arm64 + x86_64 + universal)
-        env:
-          FFMPEG_VERSION: "8.1.2"
         run: |
           chmod +x scripts/build-ffmpeg-minimal.sh
           scripts/build-ffmpeg-minimal.sh universal
-      - name: Checksums
+      - name: Verify release assets
         run: |
-          cd dist/ffmpeg-tools
-          for f in universal/ffmpeg universal/ffprobe; do
-            shasum -a 256 "$f" >> SHA256SUMS
-          done
+          cd dist/ffmpeg-tools/release
+          shasum -a 256 -c SHA256SUMS
+          test -s COPYING.FFmpeg.LGPLv2.1
+          test -s "ffmpeg-${FFMPEG_VERSION}.tar.xz"
+          test -s build-ffmpeg-minimal.sh
       - uses: actions/upload-artifact@v4
         with:
           name: ffmpeg-tools
-          path: |
-            dist/ffmpeg-tools/universal/ffmpeg
-            dist/ffmpeg-tools/universal/ffprobe
-            dist/ffmpeg-tools/SHA256SUMS
+          path: dist/ffmpeg-tools/release/*
+          if-no-files-found: error
 
   release:
     needs: [plugin, ffmpeg]
@@ -68,10 +66,9 @@ jobs:
         run: |
           mkdir -p release
           cp artifacts/iinaplgz/*.iinaplgz release/
-          cp artifacts/ffmpeg-tools/universal/ffmpeg release/ffmpeg
-          cp artifacts/ffmpeg-tools/universal/ffprobe release/ffprobe
-          cp artifacts/ffmpeg-tools/SHA256SUMS release/SHA256SUMS
-          cp THIRD_PARTY_NOTICES.md release/
+          cp artifacts/ffmpeg-tools/* release/
+          cd release
+          shasum -a 256 -c SHA256SUMS
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

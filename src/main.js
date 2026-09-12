@@ -1,10 +1,9 @@
 "use strict";
 
-"use strict";
-
 try {
 
 const { createEngine, variantPaths, parseSubtitle } = require("./engine/index.js");
+const { createJobTransport } = require("./helper-client.js");
 const { listSubtitleTracks, extractTrackToText } = require("./engine/extract.js");
 const { pickWorkingBinary, candidatesFor } = require("./engine/ffmpeg.js");
 // NOTE: iina.sidebar is accessed lazily (see deferred init below) — touching
@@ -12,29 +11,13 @@ const { pickWorkingBinary, candidatesFor } = require("./engine/ffmpeg.js");
 // JavascriptPolyfill.register).
 const { core, menu, file, utils, mpv, event, http, preferences, console: log } = iina;
 
-// Transitional configuration until the settings ticket (MAR-99): the user
-// drops a 0600 config file into the plugin data directory. The helper reads
-// the same file as its credential source, so the key exists in exactly one
-// place and never in argv, env, or logs.
-//
-// {
-//   "baseUrl": "https://api.example.com/v1",
-//   "apiKey": "...",
-//   "model": "...",
-//   "targetLanguage": "zh-Hans",       // optional, default zh-Hans
-//   "ffmpegPath": "/opt/homebrew/bin/ffmpeg",  // optional
-//   "ffprobePath": "/opt/homebrew/bin/ffprobe" // optional
-// }
-const CONFIG_PATH = "@data/config.json";
 const DOWNLOADED_FFMPEG = "@data/bin-ffmpeg";
 const DOWNLOADED_FFPROBE = "@data/bin-ffprobe";
-const DEFAULT_TOOL_DOWNLOAD_BASE = "https://github.com/weixiangyu/iina-llm-subtitle/releases/latest/download";
-const HELPER_IDLE_TIMEOUT = 300;
+const DEFAULT_TOOL_DOWNLOAD_BASE = "https://github.com/Xy2002/iina-llm-subtitle/releases/latest/download";
 
 /**
  * @typedef {{
  *   baseUrl: string,
- *   apiKey: string,
  *   model: string,
  *   targetLanguage?: string,
  *   ffmpegPath?: string,
@@ -64,7 +47,6 @@ function statePath(key) {
 
 const storage = {
   /** @param {string} key @returns {Promise<any | null>} */
-  /** @param {string} key */
   get: async (key) => {
     const paths = variantPaths(key);
     const prefix = `@data/`;
@@ -128,75 +110,39 @@ function translationsPath(key) {
   return `cache-${key}.translations.json`;
 }
 
-// MARK: helper lifecycle
+// MARK: shared helper connection
 
-const helper = { port: null, desired: false };
+/** @type {Map<string, {resolve: (value: any) => void, reject: (error: Error) => void, timer: string}>} */
+const helperRequests = new Map();
+let helperSequence = 0;
+const helperRequestPrefix = Math.random().toString(36).slice(2);
+iina.global.onMessage("helper-response", (response) => {
+  const request = response && helperRequests.get(response.id);
+  if (!request) return;
+  helperRequests.delete(response.id);
+  clearTimeout(request.timer);
+  if (response.error) request.reject(new Error(response.error));
+  else request.resolve(response);
+});
 
-/** @param {string} line */
-function helperReadyFrame(line) {
-  if (!line.startsWith("READY ")) return;
-  try {
-    helper.port = JSON.parse(line.slice(6)).port;
-    log.log(`helper ready on 127.0.0.1:${helper.port}`);
-  } catch (error) {
-    log.error(`bad helper READY frame: ${error}`);
-  }
-}
-
-/** Launch the helper and resolve once its READY frame names a port. */
-/** @param {PluginConfig} config */
+/** @param {PluginConfig} config @returns {Promise<import('./helper-client.js').HelperConnection>} */
 async function ensureHelper(config) {
-  if (helper.port) return helper.port;
-  helper.desired = true;
-  if (!config.helperPath) throw Object.assign(new Error("配置缺少 helperPath（编译产物 helper/bin/iina-llm-subtitle-helper 的绝对路径）"), { classification: "config" });
-  const helperBinary = config.helperPath;
-  const configAbsolute = utils.resolvePath(CONFIG_PATH);
-  const args = [
-    "--credentials", configAbsolute,
-    "--port", "0",
-    "--idle-timeout", String(HELPER_IDLE_TIMEOUT),
-  ];
-  utils.exec(helperBinary, args, null, (/** @type {string} */ chunk) => {
-    String(chunk).split("\n").forEach(helperReadyFrame);
-  }, (/** @type {string} */ chunk) => log.error(`helper: ${chunk}`)).then((result) => {
-    helper.port = null;
-    log.error(`helper exited (status ${result.status}): ${result.stderr}`);
-  }, (error) => {
-    helper.port = null;
-    log.error(`helper launch failed: ${error}`);
+  const result = await new Promise((resolve, reject) => {
+    const id = `${helperRequestPrefix}-${++helperSequence}`;
+    const timer = setTimeout(() => {
+      helperRequests.delete(id);
+      reject(new Error("翻译助手未就绪，请重试。"));
+    }, 10000);
+    helperRequests.set(id, { resolve, reject, timer });
+    iina.global.postMessage("helper-request", { id, baseUrl: config.baseUrl });
   });
-  // Wait for the READY frame.
-  for (let waited = 0; waited < 5000 && !helper.port; waited += 100) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  if (!helper.port) throw Object.assign(new Error("helper 未就绪"), { classification: "helper" });
-  return helper.port;
+  if (!result.configured) throw Object.assign(new Error("请先在插件设置中设置 API Key。"), { classification: "config" });
+  return result.connection;
 }
 
-// MARK: transport port over the loopback helper
-
-function makeTransport() {
-  return {
-    /** @param {{path: string, body: any}} request */
-    postJson: async (request) => {
-      if (!helper.port) throw Object.assign(new Error("helper 未运行"), { code: "network" });
-      try {
-        const options = /** @type {any} */ ({ headers: { "Content-Type": "application/json" }, data: request.body });
-        const response = await iina.http.post(`http://127.0.0.1:${helper.port}${request.path}`, options);
-        let json = null;
-        try {
-          json = typeof response.data === "object" && response.data !== null ? response.data : JSON.parse(response.text);
-        } catch {
-          json = null;
-        }
-        // iina.http does not expose response headers, so Retry-After is
-        // unavailable here and backoff falls back to its base rhythm.
-        return { status: response.statusCode, retryAfter: null, json };
-      } catch (error) {
-        throw Object.assign(new Error(`loopback request failed: ${error}`), { code: "network" });
-      }
-    },
-  };
+/** @param {PluginConfig} config */
+function makeTransport(config) {
+  return createJobTransport({ http, getConnection: () => ensureHelper(config) });
 }
 
 // MARK: process port for extraction
@@ -217,8 +163,8 @@ async function ensureTools(config) {
 
   if (!config.ffmpegForceBundled) {
     const overrides = { ffmpeg: config.ffmpegPath || "", ffprobe: config.ffprobePath || "" };
-    const ffmpegPick = await pickWorkingBinary(makeProcess(), candidatesFor(overrides, "ffmpeg", DOWNLOADED_FFMPEG));
-    const ffprobePick = await pickWorkingBinary(makeProcess(), candidatesFor(overrides, "ffprobe", DOWNLOADED_FFPROBE));
+    const ffmpegPick = await pickWorkingBinary(makeProcess(), candidatesFor(overrides, "ffmpeg", downloadedFfmpeg));
+    const ffprobePick = await pickWorkingBinary(makeProcess(), candidatesFor(overrides, "ffprobe", downloadedFfprobe));
     if (ffmpegPick.path && ffprobePick.path) {
       const source = ffmpegPick.path === downloadedFfmpeg || ffprobePick.path === downloadedFfprobe ? "downloaded" : "system";
       log.log(`tools: ${ffmpegPick.path} (${ffmpegPick.version}) / ${ffprobePick.path} (${ffprobePick.version}) [${source}]`);
@@ -238,7 +184,6 @@ async function ensureTools(config) {
  * base is a preference so packaging can point at the plugin's own release.
  * @param {PluginConfig} config @param {"ffmpeg" | "ffprobe"} tool @returns {Promise<void>}
  */
-/** @param {PluginConfig} config @param {"ffmpeg" | "ffprobe"} tool @returns {Promise<void>} */
 async function downloadTool(config, tool) {
   const base = config.ffmpegDownloadBaseUrl || DEFAULT_TOOL_DOWNLOAD_BASE;
   const dest = tool === "ffmpeg" ? DOWNLOADED_FFMPEG : DOWNLOADED_FFPROBE;
@@ -261,40 +206,46 @@ async function downloadTool(config, tool) {
   log.log(`quarantine check for ${tool}: ${xattr.status === 0 ? "PRESENT" : "absent"} (${xattr.stderr || xattr.stdout || ""})`);
 }
 
-// MARK: engine
+// MARK: translation state
 
-/** @type {any} */
-let engine = null;
-/** @param {PluginConfig} config */
-function getEngine(config) {
-  // Cheap to construct: rebuilt per run so preference changes (retries,
-  // batch budget) always apply.
-  engine = createEngine({
-    storage: { ...storage, ...sizeTrackingStorage },
-    transport: makeTransport(),
-    maxBatchChars: config.maxBatchChars,
-    maxRetries: config.maxRetries,
-    glossaryPrecheck: true,
-    shouldCancel: () => cancelRequested,
-  });
-  return engine;
-}
-
-// MARK: translation flow
-
-/** @type {{ path: string, media: string, sourceId: number } | null} */
-let pending = null;
-let translating = false;
-let cancelRequested = false;
-let mode = "off"; // off | bilingual | translationOnly | paused
+/** @typedef {{generation: number, media: string, cancelled: boolean}} TranslationRun */
+/** @type {TranslationRun | null} */
+let activeRun = null;
+let mediaGeneration = 0;
+/** @type {number | null} */
+let deferredAutoGeneration = null;
+let mode = "off";
 /** @type {Record<string, any>} */
 const modeMenuItems = {};
-/** @type {{ cacheKey: string, bilingualPath: string, translationOnlyPath: string, originalTrackId: number | null } | null} */
+/** @type {{media: string, generation: number, cacheKey: string, bilingualPath: string, translationOnlyPath: string, originalTrackId: number} | null} */
 let lastVariants = null;
 /** @type {number | null} */
 let originalTrackId = null;
+/** @type {number | null} */
+let resumeTrackId = null;
+/** @type {{path: string, media: string, generation: number, expectedSid: number, nextMode: string} | null} */
+let pending = null;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let deadline;
+/** @type {any} */
+let sidebarState = { view: "idle", phase: "", done: 0, total: 0, cancelled: false, errorMessage: "" };
+
+/** @param {TranslationRun} run */
+function isCurrentRun(run) {
+  return run.generation === mediaGeneration && mpv.getString("path") === run.media;
+}
+
+/** @param {PluginConfig} config @param {TranslationRun} run */
+function getEngine(config, run) {
+  return createEngine({
+    storage: { ...storage, ...sizeTrackingStorage },
+    transport: makeTransport(config),
+    maxBatchChars: config.maxBatchChars,
+    maxRetries: config.maxRetries,
+    glossaryPrecheck: true,
+    shouldCancel: () => run.cancelled || !isCurrentRun(run),
+  });
+}
 
 function clearPending() {
   pending = null;
@@ -302,31 +253,50 @@ function clearPending() {
   deadline = undefined;
 }
 
+/** @param {string} nextMode */
+function selectModeMenu(nextMode) {
+  mode = nextMode;
+  for (const key of Object.keys(modeMenuItems)) modeMenuItems[key].selected = key === mode;
+}
+
 function finishLoad() {
   if (!pending) return;
   const request = pending;
-  if (mpv.getString("path") !== request.media) {
+  if (mpv.getString("path") !== request.media || request.generation !== mediaGeneration) {
     clearPending();
     return;
   }
-  // IINA's cached core tracks update after loadTrack returns. Match mpv's
-  // actual external filename, never assume the new track has the largest id.
   const tracks = mpv.getNative("track-list");
   if (!Array.isArray(tracks)) return;
-  const generated = tracks.find((track) =>
-    track.type === "sub" && track.external === true &&
+  const generated = tracks.find((track) => track.type === "sub" && track.external === true &&
     track["external-filename"] === request.path && typeof track.id === "number");
   if (!generated) return;
-
   const selected = mpv.getNumber("sid");
   clearPending();
-  if (selected !== request.sourceId && selected !== generated.id) {
-    core.osd("已暂停：保留你选择的字幕轨。");
+  if (selected !== request.expectedSid && selected !== generated.id) {
+    selectModeMenu("paused");
+    sidebarPost("state", { view: "completed", done: 1, total: 1 });
+    core.osd("已暂停：保留你选择的字幕轨。可从字幕模式菜单重新加载。");
     return;
   }
-  // Reloading an existing filename does not select it in IINA 1.4.4.
   core.subtitle.id = generated.id;
-  core.osd("双语字幕已就绪。");
+  selectModeMenu(request.nextMode);
+  sidebarPost("state", { view: "completed", done: 1, total: 1 });
+  core.osd(request.nextMode === "translationOnly" ? "仅译文字幕已就绪。" : "双语字幕已就绪。");
+}
+
+/** @param {string} path @param {string} nextMode @param {number} [expectedSid] */
+function loadVariant(path, nextMode, expectedSid) {
+  if (!lastVariants || lastVariants.media !== mpv.getString("path") || lastVariants.generation !== mediaGeneration) return;
+  clearPending();
+  pending = { path, media: lastVariants.media, generation: mediaGeneration,
+    expectedSid: expectedSid === undefined ? mpv.getNumber("sid") : expectedSid, nextMode };
+  deadline = setTimeout(() => {
+    clearPending();
+    core.osd("IINA 未确认字幕轨加载。请重试。");
+  }, 3000);
+  core.subtitle.loadTrack(path);
+  setTimeout(finishLoad, 0);
 }
 
 /** @param {any} error @returns {string} */
@@ -341,35 +311,6 @@ function failureMessage(error) {
   }
 }
 
-/**
- * One-time migration: the pre-settings era stored everything in a hand-written
- * config.json. If preferences are unconfigured and that file exists, import it.
- * @param {PluginConfig} prefs
- * @returns {PluginConfig}
- */
-function migrateLegacyConfig(prefs) {
-  const configured = prefs.baseUrl && prefs.apiKey && prefs.model;
-  if (configured || !file.exists(CONFIG_PATH)) return prefs;
-  try {
-    const legacy = JSON.parse(file.read(CONFIG_PATH, {}) || "{}");
-    const importable = ["baseUrl", "apiKey", "model", "targetLanguage", "ffmpegPath", "ffprobePath", "helperPath"];
-    /** @type {Record<string, any>} */
-    const prefLike = /** @type {any} */ (prefs);
-    let imported = false;
-    for (const key of importable) {
-      if (legacy[key] && !prefLike[key]) {
-        preferences.set(key, legacy[key]);
-        prefLike[key] = legacy[key];
-        imported = true;
-      }
-    }
-    if (imported) preferences.sync();
-  } catch (error) {
-    log.error(`legacy config migration failed: ${error}`);
-  }
-  return prefs;
-}
-
 /** @returns {PluginConfig} */
 function readPrefs() {
   /** @param {string} key @param {any} fallback */
@@ -379,7 +320,6 @@ function readPrefs() {
   };
   return {
     baseUrl: String(get("baseUrl", "")),
-    apiKey: String(get("apiKey", "")),
     model: String(get("model", "")),
     targetLanguage: String(get("targetLanguage", "zh-Hans")),
     defaultMode: String(get("defaultMode", "bilingual")),
@@ -397,21 +337,6 @@ function readPrefs() {
     ffmpegForceBundled: Boolean(get("ffmpegForceBundled", false)),
     ffmpegDownloadBaseUrl: String(get("ffmpegDownloadBaseUrl", "")),
   };
-}
-
-/**
- * The helper reads its credentials from this file; keep it in sync with the
- * preference values and locked to 0600. The key exists here and in IINA's
- * preference storage — nowhere else, and never in argv/env/logs.
- * @param {PluginConfig} config @returns {Promise<void>}
- */
-async function syncHelperCredentials(config) {
-  const payload = JSON.stringify({ baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model });
-  file.write(CONFIG_PATH, payload);
-  const chmod = await utils.exec("/bin/chmod", ["600", utils.resolvePath(CONFIG_PATH)]);
-  if (chmod.status !== 0) {
-    throw new Error("无法将凭据文件权限设为 0600，已中止翻译以保护 API key。");
-  }
 }
 
 /** @param {PluginConfig} prefs @returns {import('./engine/assemble.js').AssemblyStyle} */
@@ -551,6 +476,7 @@ function enforceCacheLimit(prefs) {
   }
   for (const key of ledger.order.slice()) {
     if (total <= limitBytes) break;
+    if (lastVariants && key === lastVariants.cacheKey) continue;
     const group = ledger.keys[key];
     if (!group) continue;
     for (const path of group.order) total -= group.sizes[path] || 0;
@@ -558,244 +484,211 @@ function enforceCacheLimit(prefs) {
   }
 }
 
-/**
- * @param {number} trackId
- * @param {{silent?: boolean}} [options]
- */
+/** @param {number} trackId @param {{silent?: boolean}} [options] */
 async function translateTrackById(trackId, options) {
   await translateCurrentSubtitle({ ...options, trackId });
 }
 
-/** @returns {PluginConfig | null} */
-function loadConfig() {
-  return migrateLegacyConfig(readPrefs());
+/** @param {any} track @param {PluginConfig} config @param {string} media
+ * @returns {Promise<{format: "srt" | "ass", content: string}>} */
+async function readSubtitle(track, config, media) {
+  if (track.isExternal) {
+    const source = utils.resolvePath(`@sub/${track.id}`);
+    if (!source || !/\.(srt|ass|ssa)$/i.test(source)) throw new Error("选中的外挂字幕格式不受支持（仅 SRT / ASS）。");
+    const content = file.read(source, {});
+    if (typeof content !== "string") throw new Error("无法读取字幕文件。");
+    return { format: /\.(ass|ssa)$/i.test(source) ? "ass" : "srt", content };
+  }
+  const tools = await ensureTools(config);
+  const trackList = mpv.getNative("track-list");
+  const mpvTrack = Array.isArray(trackList) ? trackList.find((t) => t.type === "sub" && t.id === track.id) : null;
+  const containerIndex = mpvTrack && typeof mpvTrack["ff-index"] === "number" ? mpvTrack["ff-index"] : -1;
+  const tracks = await listSubtitleTracks(makeProcess(), { ffprobe: tools.ffprobe, media });
+  const probed = tracks.find((t) => t.index === containerIndex);
+  if (!probed) throw new Error("未能确定容器中的字幕轨，请重新选择字幕后重试。");
+  const extracted = await extractTrackToText(makeProcess(), { ffmpeg: tools.ffmpeg, media, track: probed });
+  return { format: extracted.format, content: extracted.content };
 }
 
-/**
- * @param {{silent?: boolean, trackId?: number}} [options]
- */
+/** @param {{silent?: boolean, trackId?: number}} [options] */
 async function translateCurrentSubtitle(options) {
   const { silent = false, trackId } = options || {};
-  let config = null;
+  if (pending || activeRun) {
+    if (!silent) core.osd(activeRun && activeRun.cancelled ? "正在结束当前批次，请稍候。" : "正在翻译或加载字幕，请稍候。");
+    return;
+  }
+  const run = { generation: mediaGeneration, media: mpv.getString("path"), cancelled: false };
+  activeRun = run;
   try {
-    if (pending || translating) {
-      if (!silent) core.osd("正在加载双语字幕，请稍候。");
-      return;
-    }
-    translating = true;
-    config = migrateLegacyConfig(readPrefs());
+    const config = readPrefs();
     maybeProcessCacheClearRequest(config);
-    if (!config.baseUrl || !config.apiKey || !config.model) {
-      if (!silent) core.osd("请先在 设置 → 插件 → LLM Subtitle Prototype 中配置 LLM 服务。");
+    if (!config.baseUrl || !config.model) {
+      if (!silent) core.osd("请先在插件设置中配置 LLM 服务地址和模型。");
       return;
     }
-    await syncHelperCredentials(config);
-
-    const media = mpv.getString("path");
-    const track = trackId !== undefined
-      ? core.subtitle.tracks.find((t) => t.id === trackId)
-      : core.subtitle.currentTrack;
-    if (!media || !track) {
+    const track = trackId !== undefined ? core.subtitle.tracks.find((t) => t.id === trackId) : core.subtitle.currentTrack;
+    if (!run.media || !track) {
       if (!silent) core.osd("请先打开视频并选中一条字幕轨。");
       return;
     }
-    const source = track.isExternal ? utils.resolvePath(`@sub/${track.id}`) : null;
-
-    /** @type {{format: "srt" | "ass", content: string}} */
-    let subtitle;
-    if (source && /\.(srt)$/i.test(source)) {
-      const text = file.read(source, {});
-      if (typeof text !== "string") throw new Error("无法读取 SRT 字幕文件。");
-      subtitle = { format: "srt", content: text };
-    } else if (source && /\.(ass|ssa)$/i.test(source)) {
-      const text = file.read(source, {});
-      if (typeof text !== "string") throw new Error("无法读取 ASS 字幕文件。");
-      subtitle = { format: "ass", content: text };
-    } else if (!track.isExternal) {
-      // Embedded container track: extract via ffmpeg (container index from
-      // mpv's track-list `ff-index`).
-      const tools = await ensureTools(config);
-      const ffmpeg = tools.ffmpeg;
-      const ffprobe = tools.ffprobe;
-      const trackList = mpv.getNative("track-list");
-      const mpvTrack = Array.isArray(trackList)
-        ? trackList.find((t) => t.type === "sub" && t.id === track.id)
-        : null;
-      const containerIndex = mpvTrack && typeof mpvTrack["ff-index"] === "number" ? mpvTrack["ff-index"] : track.id - 1;
-      const tracks = await listSubtitleTracks(makeProcess(), { ffprobe, media });
-      const probed = tracks.find((t) => t.index === containerIndex);
-      if (!probed) throw new Error(`未在容器中找到字幕轨（索引 ${containerIndex}）。`);
-      const extracted = await extractTrackToText(makeProcess(), { ffmpeg, media, track: probed });
-      subtitle = { format: extracted.format, content: extracted.content };
-    } else {
-      core.osd("选中的外挂字幕格式不受支持（仅 SRT / ASS / 内嵌文本轨）。");
+    resumeTrackId = track.id;
+    const expectedSid = mpv.getNumber("sid");
+    sidebarPost("state", { view: "running", phase: "extraction", done: 0, total: 1, cancelled: false, errorMessage: "" });
+    const subtitle = await readSubtitle(track, config, run.media);
+    if (!isCurrentRun(run) || run.cancelled) {
+      if (isCurrentRun(run)) sidebarPost("state", { view: "error", cancelled: true, errorMessage: "" });
       return;
     }
-
-    const port = await ensureHelper(config);
-    log.log(`translating via 127.0.0.1:${port}`);
-    const result = await getEngine(config).translateTrack(subtitle, {
-      model: config.model,
-      targetLanguage: config.targetLanguage,
-      style: styleFromPrefs(config),
+    const result = await getEngine(config, run).translateTrack(subtitle, {
+      model: config.model, targetLanguage: config.targetLanguage || "zh-Hans", style: styleFromPrefs(config),
     }, {
-      onProgress: (/** @type {any} */ event) => {
-        sidebarPost("progress", { phase: event.phase, done: event.done, total: event.total });
-        if (event.phase === "translation") core.osd(`翻译中 ${event.done}/${event.total} 批…`);
-        else if (event.phase === "assembly") core.osd("正在装配双语字幕…");
+      onProgress: (/** @type {any} */ progress) => {
+        if (!isCurrentRun(run)) return;
+        const done = progress.linesDone === undefined ? progress.done : progress.linesDone;
+        const total = progress.linesTotal === undefined ? progress.total : progress.linesTotal;
+        sidebarPost("progress", { phase: progress.phase, done, total });
       },
     });
+    if (!isCurrentRun(run)) return;
+    if (run.cancelled || result.status === "cancelled") {
+      sidebarPost("state", { view: "error", cancelled: true, errorMessage: "" });
+      if (!silent) core.osd("已取消，已完成的批次已保留，可继续翻译。");
+      return;
+    }
     if (!result.bilingual || !result.translationOnly) throw new Error("翻译结果不完整。");
     lastVariants = {
-      cacheKey: result.cacheKey,
+      media: run.media, generation: run.generation, cacheKey: result.cacheKey,
       bilingualPath: utils.resolvePath(`@data/${result.bilingual.path}`),
-      translationOnlyPath: utils.resolvePath(`@data/${result.translationOnly.path}`),
-      originalTrackId: track.id,
+      translationOnlyPath: utils.resolvePath(`@data/${result.translationOnly.path}`), originalTrackId: track.id,
     };
     originalTrackId = track.id;
-    const chosen = config.defaultMode === "translationOnly" ? result.translationOnly : result.bilingual;
-    const absolute = utils.resolvePath(`@data/${chosen.path}`);
-    if (!absolute || !file.exists(`@data/${chosen.path}`)) throw new Error("双语字幕文件写入失败。");
-    core.osd(result.cacheHit ? "缓存命中：直接加载已翻译的双语字幕。" : "双语字幕翻译完成。");
-    mode = config.defaultMode === "translationOnly" ? "translationOnly" : "bilingual";
-    translating = false;
+    const nextMode = config.defaultMode === "translationOnly" ? "translationOnly" : "bilingual";
+    const chosen = nextMode === "translationOnly" ? result.translationOnly : result.bilingual;
+    if (!file.exists(`@data/${chosen.path}`)) throw new Error("字幕文件写入失败。");
     enforceCacheLimit(config);
-
-    pending = { path: absolute, media, sourceId: track.id };
-    deadline = setTimeout(() => {
-      clearPending();
-      core.osd("IINA 未确认字幕轨加载。请查看插件开发者工具中的错误日志。");
-      log.error("generated ASS was not found in mpv track-list after loadTrack.");
-    }, 3000);
-    core.subtitle.loadTrack(absolute);
-    // Also handles reloading a previously generated track, which may not
-    // produce a track-list change. Defer out of the native menu callback.
-    setTimeout(finishLoad, 0);
-  } catch (/** @type {unknown} */ error) {
+    if (mpv.getNumber("sid") !== expectedSid) {
+      selectModeMenu("paused");
+      sidebarPost("state", { view: "completed" });
+      core.osd("翻译已完成，保留你选择的字幕轨。可从字幕模式菜单加载译文。");
+      return;
+    }
+    loadVariant(utils.resolvePath(`@data/${chosen.path}`), nextMode, expectedSid);
+  } catch (error) {
+    if (!isCurrentRun(run)) return;
     clearPending();
-    translating = false;
-    sidebarPost("state", { view: "error", cancelled: cancelRequested, errorMessage: failureMessage(error) });
-    cancelRequested = false;
     const message = failureMessage(error);
-    const err = /** @type {any} */ (error);
-    log.error(`translate failed: ${err && err.stack ? err.stack : err}`);
-    try {
-      file.write("@data/last-error.txt", `${new Date().toISOString()}\n${err && err.name ? err.name : "?"}: ${err && err.message ? err.message : String(err)}\n${err && err.stack ? err.stack : ""}\n`);
-    } catch { /* diagnostics only */ }
+    sidebarPost("state", { view: "error", cancelled: run.cancelled, errorMessage: message });
     if (!silent) core.osd(`翻译失败：${message}`);
+  } finally {
+    if (activeRun === run) {
+      activeRun = null;
+      if (deferredAutoGeneration === mediaGeneration) {
+        const generation = deferredAutoGeneration;
+        deferredAutoGeneration = null;
+        setTimeout(() => {
+          if (generation === mediaGeneration && readPrefs().autoTranslate) translateCurrentSubtitle({ silent: true });
+        }, 0);
+      }
+    }
   }
 }
 
 event.on("mpv.track-list.changed", () => {
   if (pending) setTimeout(finishLoad, 0);
 });
-event.on("iina.file-started", clearPending);
+event.on("iina.file-started", () => {
+  mediaGeneration += 1;
+  deferredAutoGeneration = null;
+  if (activeRun) activeRun.cancelled = true;
+  clearPending();
+  lastVariants = null;
+  originalTrackId = null;
+  resumeTrackId = null;
+  selectModeMenu("off");
+  sidebarPost("state", { view: "idle", phase: "", done: 0, total: 0, cancelled: false, errorMessage: "" });
+});
 event.on("iina.file-loaded", () => {
+  const generation = mediaGeneration;
   setTimeout(async () => {
+    if (generation !== mediaGeneration) return;
     try {
-      /** @type {PluginConfig} */
       const prefs = readPrefs();
       maybeProcessCacheClearRequest(prefs);
       const loaded = await loadCachedIfAvailable();
-      if (loaded) return;
+      if (generation !== mediaGeneration || loaded) return;
       if (prefs.autoTranslate) {
+        if (activeRun && !isCurrentRun(activeRun)) { deferredAutoGeneration = generation; return; }
         const track = core.subtitle.currentTrack;
-        if (track) translateTrackById(track.id, { silent: true });
+        if (track) await translateTrackById(track.id, { silent: true });
       }
-    } catch (error) {
-      log.error(`auto-translate failed: ${error}`);
-    }
+    } catch (error) { log.error(`auto-load failed: ${failureMessage(error)}`); }
   }, 800);
 });
 setInterval(() => {
-  try {
-    maybeProcessCacheClearRequest(/** @type {PluginConfig} */ (readPrefs()));
-  } catch (error) {
-    log.error(`cache-clear check failed: ${error}`);
-  }
+  if (!activeRun && !pending) maybeProcessCacheClearRequest(readPrefs());
 }, 30000);
-// MARK: sidebar (progress / cancel / resume)
+
+// MARK: sidebar
 
 /** @param {string} name @param {any} data */
 function sidebarPost(name, data) {
-  try {
-    iina.sidebar.postMessage(name, data);
-  } catch (error) {
-    log.error(`sidebar post failed: ${error}`);
-  }
+  sidebarState = { ...sidebarState, ...data, ...(name === "progress" ? { view: "running" } : {}) };
+  try { iina.sidebar.postMessage(name, data); } catch { /* the WebView may still be loading */ }
 }
-// Deferred: activating the sidebar webview synchronously at entry load
-// raced IINA's plugin registration on some launches.
+function cancelTranslation() {
+  if (!activeRun) return;
+  activeRun.cancelled = true;
+  core.osd("正在取消，等待当前批次结束并保存。");
+}
 setTimeout(() => {
   try {
     const sb = iina.sidebar;
     sb.loadFile("sidebar.html");
-    sb.show();
-    sb.onMessage("cancel", () => {
-      cancelRequested = true;
-    });
-    sb.onMessage("resume", () => {
-      translateCurrentSubtitle({ silent: false });
-    });
+    sb.onMessage("ready", () => sb.postMessage("state", sidebarState));
+    sb.onMessage("cancel", cancelTranslation);
+    sb.onMessage("resume", () => translateCurrentSubtitle({ trackId: resumeTrackId === null ? undefined : resumeTrackId }));
     sb.onMessage("giveup", () => {
-      cancelRequested = false;
-      translating = false;
-      sidebarPost("state", { view: "error", cancelled: true, errorMessage: "" });
-      core.osd("已放弃：中间态已保留，可随时继续。");
+      if (activeRun) activeRun.cancelled = true;
+      sidebarPost("state", { view: "idle", cancelled: false, errorMessage: "" });
+      core.osd("中间结果已保留，可稍后继续。");
     });
-  } catch (error) {
-    log.error(`sidebar init failed: ${error}`);
-  }
+  } catch (error) { log.error(`sidebar init failed: ${failureMessage(error)}`); }
 }, 500);
 
 // MARK: cache-hit auto-load on file load
 
 async function loadCachedIfAvailable() {
-  const config = loadConfig();
-  if (!config) return false;
+  const config = readPrefs();
   const track = core.subtitle.currentTrack;
-  if (!track) return false;
-  let subtitle;
-  if (track.isExternal) {
-    const source = utils.resolvePath(`@sub/${track.id}`);
-    if (!source || !/\.(srt|ass|ssa)$/i.test(source)) return false;
-    const text = file.read(source, {});
-    if (typeof text !== "string") return false;
-    subtitle = { format: /\.(ass|ssa)$/i.test(source) ? "ass" : "srt", content: text };
-  } else {
-    const tools = await ensureTools(config);
-    const trackList = mpv.getNative("track-list");
-    const mpvTrack = Array.isArray(trackList) ? trackList.find((t) => t.type === "sub" && t.id === track.id) : null;
-    const containerIndex = mpvTrack && typeof mpvTrack["ff-index"] === "number" ? mpvTrack["ff-index"] : track.id - 1;
-    const tracks = await listSubtitleTracks(makeProcess(), { ffprobe: tools.ffprobe, media: mpv.getString("path") });
-    const probed = tracks.find((t) => t.index === containerIndex);
-    if (!probed || probed.kind !== "text") return false;
-    const extracted = await extractTrackToText(makeProcess(), { ffmpeg: tools.ffmpeg, media: mpv.getString("path"), track: probed });
-    subtitle = { format: extracted.format, content: extracted.content };
-  }
-  /** @type {import("./engine/index.js").Cue[]} */
-  const cues = parseSubtitle(/** @type {"srt" | "ass"} */ (subtitle.format), subtitle.content);
+  const media = mpv.getString("path");
+  if (!track || !media || !config.model) return false;
+  const run = { generation: mediaGeneration, media, cancelled: false };
+  const expectedSid = mpv.getNumber("sid");
+  const subtitle = await readSubtitle(track, config, media);
+  if (!isCurrentRun(run)) return false;
+  const cues = parseSubtitle(subtitle.format, subtitle.content);
   const key = require("./engine/cache.js").buildCacheKey(
     cues.map((cue) => `${cue.startMs}\u0000${cue.endMs}\u0000${cue.text}`).join("\u0001"),
     { model: config.model, targetLanguage: config.targetLanguage || "zh-Hans" },
   );
-  const paths = variantPaths(key);
-  if (!file.exists(`@data/${paths.bilingual}`)) return false;
+  if (!await storage.getTranslations(key)) return false;
+  const result = await getEngine(config, run).translateTrack(subtitle, {
+    model: config.model, targetLanguage: config.targetLanguage || "zh-Hans", style: styleFromPrefs(config),
+  });
+  if (!isCurrentRun(run) || !result.bilingual || !result.translationOnly) return false;
   lastVariants = {
-    cacheKey: key,
-    bilingualPath: utils.resolvePath(`@data/${paths.bilingual}`) || "",
-    translationOnlyPath: utils.resolvePath(`@data/${paths.translationOnly}`) || "",
-    originalTrackId: track.id,
+    media, generation: run.generation, cacheKey: key,
+    bilingualPath: utils.resolvePath(`@data/${result.bilingual.path}`),
+    translationOnlyPath: utils.resolvePath(`@data/${result.translationOnly.path}`), originalTrackId: track.id,
   };
   originalTrackId = track.id;
-  const prefs = readPrefs();
-  applyMode(prefs.defaultMode === "translationOnly" ? "translationOnly" : "bilingual");
-  core.osd("缓存命中：已加载双语字幕。");
+  if (mpv.getNumber("sid") !== expectedSid) { selectModeMenu("paused"); return true; }
+  applyMode(config.defaultMode === "translationOnly" ? "translationOnly" : "bilingual");
+  core.osd("缓存命中：已加载翻译字幕。");
   return true;
 }
 
-// Menu items cannot be removed once added, so the hotkey preference applies
-// on the next IINA launch.
+// Bind the hotkey when this player instance creates its plugin menu.
 (function buildMenu() {
   const prefs = readPrefs();
   menu.addItem(menu.item("翻译字幕（当前轨）", () => {
@@ -834,30 +727,27 @@ async function loadCachedIfAvailable() {
   for (const item of Object.values(modeMenuItems)) modeItem.addSubMenuItem(item);
   menu.addItem(modeItem);
 
-  menu.addItem(menu.item("取消翻译", () => {
-    cancelRequested = true;
-    core.osd("正在取消…");
+  menu.addItem(menu.item("取消翻译", cancelTranslation));
+  menu.addItem(menu.item("设置 API Key…", () => {
+    preferences.set("credentialsEditRequested", Date.now());
   }));
 })();
 
 /** @param {string} nextMode */
 function applyMode(nextMode) {
-  mode = nextMode;
-  for (const key of Object.keys(modeMenuItems)) {
-    modeMenuItems[key].selected = key === nextMode;
-  }
+  clearPending();
   if (nextMode === "off") {
-    if (originalTrackId) core.subtitle.id = originalTrackId;
+    if (originalTrackId !== null && core.subtitle.tracks.some((track) => track.id === originalTrackId)) core.subtitle.id = originalTrackId;
+    selectModeMenu("off");
     core.osd("已关闭翻译字幕。");
     return;
   }
-  if (!lastVariants) {
-    core.osd("尚无已翻译的双语字幕。");
+  if (!lastVariants || lastVariants.media !== mpv.getString("path") || lastVariants.generation !== mediaGeneration) {
+    core.osd("尚无已翻译的字幕。");
     return;
   }
   const target = nextMode === "translationOnly" ? lastVariants.translationOnlyPath : lastVariants.bilingualPath;
-  core.subtitle.loadTrack(target);
-  core.osd(nextMode === "bilingual" ? "双语字幕。" : "仅译文模式。");
+  loadVariant(target, nextMode);
 }
 
 } catch (/** @type {any} */ loadError) {

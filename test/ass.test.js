@@ -47,3 +47,16 @@ test("keeps the raw tagged text as rawText while text is the plain version", () 
 test("rejects an ASS document without dialogue events", () => {
   assert.throws(() => parseAss("[Script Info]\nnothing useful"), /No ASS dialogue/);
 });
+
+test("drawing commands are excluded from text while their original events survive", () => {
+  const drawing = "{\\p1}m 0 0 l 100 0 100 100 0 100";
+  assert.equal(stripAssTags(`${drawing}{\\p0}Visible words`), "Visible words");
+  assert.equal(stripAssTags(`Before{\\an8\\p2}m 0 0 l 20 20{\\p0} after`), "Before after");
+  const cues = parseAss(`[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,${drawing}{\\p0}Visible words\nDialogue: 0,0:00:04.00,0:00:05.00,Default,,0,0,0,,${drawing}\n`);
+  assert.equal(cues[0].text, "Visible words");
+  assert.equal(cues[0].rawText, `${drawing}{\\p0}Visible words`);
+  assert.equal(cues[1].text, "");
+  assert.equal(cues[1].rawText, drawing);
+  assert.equal(cues[1].isDrawingOnly, true);
+  assert.deepEqual([cues[1].startMs, cues[1].endMs], [4000, 5000]);
+});

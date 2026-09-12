@@ -56,6 +56,7 @@ function canonicalCueText(cues) {
  *   text: string,
  *   rawText?: string,
  *   isAssNative?: boolean,
+ *   isDrawingOnly?: boolean,
  * }} Cue
  */
 
@@ -105,6 +106,7 @@ function createEngine(deps) {
     glossaryPrecheck: deps.glossaryPrecheck,
     precedingWindow: deps.precedingWindow,
     maxRetries: deps.maxRetries,
+    shouldCancel: deps.shouldCancel,
   });
 
   /**
@@ -136,7 +138,7 @@ function createEngine(deps) {
       await deps.storage.put(cacheKey, refreshed);
       return { cacheHit: true, status: "completed", cacheKey, bilingual: refreshed.bilingual, translationOnly: refreshed.translationOnly };
     }
-    const run = await runBatch(cues, {
+    const run = await runBatch(cues.filter((cue) => !cue.isDrawingOnly), {
       cacheKey,
       model: options.model,
       targetLanguage: options.targetLanguage,
@@ -146,7 +148,9 @@ function createEngine(deps) {
     if (run.status === "cancelled") {
       return { cacheHit: false, status: "cancelled", cacheKey, completed: run.completed, total: run.total };
     }
-    const translations = cues.map((cue) => run.translationsById[wireId(cue.ordinal)]);
+    // Keep the cache array aligned with all original events, including
+    // drawings that have no text to send to the translator.
+    const translations = cues.map((cue) => cue.isDrawingOnly ? "" : run.translationsById[wireId(cue.ordinal)]);
     if (translations.some((text) => typeof text !== "string")) {
       throw new Error("Translation state is incomplete despite a completed run.");
     }
@@ -176,7 +180,7 @@ function createEngine(deps) {
 function estimateTrack(subtitle, options) {
   /** @type {string | {format: "srt" | "ass", content: string}} */
   const input = typeof subtitle === "string" ? { format: /** @type {const} */ ("srt"), content: subtitle } : subtitle;
-  const cues = parseSubtitle(input.format, input.content);
+  const cues = parseSubtitle(input.format, input.content).filter((cue) => !cue.isDrawingOnly);
   const batches = planBatches(cues, options);
   const charCount = cues.reduce((sum, cue) => sum + cue.text.length, 0);
   return {
