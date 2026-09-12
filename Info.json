@@ -1,7 +1,7 @@
 {
   "name": "LLM Subtitle Prototype",
   "identifier": "com.weixiangyu.iina.llm-subtitle.prototype",
-  "version": "0.1.0-prototype.1",
+  "version": "1.0.1",
   "description": "LLM 字幕翻译：将内嵌/外挂字幕整轨翻译为双语字幕（支持 OpenAI 兼容接口）。Translate subtitle tracks with an LLM.",
   "author": {
     "name": "weixiangyu"

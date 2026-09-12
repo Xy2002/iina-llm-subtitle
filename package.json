@@ -1,6 +1,6 @@
 {
   "name": "iina-llm-subtitle",
-  "version": "0.1.0-prototype.1",
+  "version": "1.0.1",
   "private": true,
   "description": "MAR-91 native subtitle track prototype for IINA",
   "type": "commonjs",
